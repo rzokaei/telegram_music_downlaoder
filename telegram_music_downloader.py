@@ -90,7 +90,12 @@ async def download_music_files(client, channel_username, download_dir):
     
     downloaded_count = 0
     skipped_count = 0
+    ignored_count = 0
     error_count = 0
+    
+    # Load ignore list (from project root, not downloads directory)
+    script_dir = Path(__file__).parent.absolute()
+    ignore_list = load_ignore_list(script_dir)
     
     # Iterate through all messages in the channel
     async for message in client.iter_messages(entity):
@@ -159,6 +164,13 @@ async def download_music_files(client, channel_username, download_dir):
         filename = sanitize_filename(filename)
         file_path = download_path / filename
         
+        # Check if file is in ignore list (case-insensitive)
+        if filename.lower() in ignore_list:
+            original_ignore_name = ignore_list.get(filename.lower(), filename)
+            print(f"🚫 Skipping (in ignore list): {original_ignore_name}")
+            ignored_count += 1
+            continue
+        
         # Check if file already exists (sync-based download)
         if file_path.exists():
             print(f"⏭️  Skipping (already exists): {filename}")
@@ -192,6 +204,7 @@ async def download_music_files(client, channel_username, download_dir):
     print("Download Summary:")
     print(f"  ✅ Downloaded: {downloaded_count}")
     print(f"  ⏭️  Skipped (already exists): {skipped_count}")
+    print(f"  🚫 Ignored (in ignore list): {ignored_count}")
     print(f"  ❌ Errors: {error_count}")
     print(f"  📁 Total files in directory: {downloaded_count + skipped_count}")
     print("="*50)
@@ -205,6 +218,45 @@ def sanitize_filename(filename):
     # Remove leading/trailing spaces and dots
     filename = filename.strip(' .')
     return filename
+
+
+def load_ignore_list(base_dir):
+    """
+    Load the list of files to ignore from ignore_list.txt.
+    
+    Args:
+        base_dir: Directory where ignore_list.txt should be located (project root)
+        
+    Returns:
+        dict: Dictionary mapping lowercase filenames to original filenames for case-insensitive matching
+    """
+    # Ensure base_dir is a Path object
+    if isinstance(base_dir, str):
+        base_dir = Path(base_dir)
+    ignore_list_path = base_dir / 'ignore_list.txt'
+    ignore_dict = {}  # Maps lowercase to original for case-insensitive matching
+    
+    if ignore_list_path.exists():
+        try:
+            with open(ignore_list_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    # Strip whitespace and skip empty lines and comments
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        ignore_dict[line.lower()] = line
+            if ignore_dict:
+                print(f"📋 Loaded {len(ignore_dict)} file(s) from ignore list")
+        except (IOError, OSError) as e:
+            print(f"⚠️  Warning: Could not read ignore_list.txt: {e}")
+    else:
+        # Create an empty ignore_list.txt file if it doesn't exist
+        try:
+            ignore_list_path.touch()
+            print(f"📋 Created empty ignore_list.txt at {ignore_list_path}")
+        except (IOError, OSError) as e:
+            print(f"⚠️  Warning: Could not create ignore_list.txt: {e}")
+    
+    return ignore_dict
 
 
 async def main():
