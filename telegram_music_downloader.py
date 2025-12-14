@@ -8,6 +8,7 @@ Implements sync-based downloading (skips files that already exist).
 import os
 import sys
 import asyncio
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
@@ -110,12 +111,37 @@ async def download_music_files(client, channel_username, download_dir):
     skipped_count = 0
     ignored_count = 0
     error_count = 0
+    processed_count = 0
     
     # Load ignore list (from project root, not downloads directory)
     script_dir = Path(__file__).parent.absolute()
     ignore_list = load_ignore_list(script_dir)
     
-    # Iterate through all messages in the channel
+    # First pass: Count total audio files for progress tracking
+    log_print("📊 Counting audio files in channel...")
+    total_audio_files = 0
+    async for message in client.iter_messages(entity):
+        if not message.media:
+            continue
+        
+        # Check if message contains audio (same logic as below)
+        is_audio = False
+        if message.audio or message.voice:
+            is_audio = True
+        elif message.document:
+            doc = message.document
+            is_audio_mime = hasattr(doc, 'mime_type') and doc.mime_type and doc.mime_type.startswith('audio/')
+            filename = get_filename_from_document(doc)
+            if is_audio_mime or (filename and is_audio_file(filename)):
+                is_audio = True
+        
+        if is_audio:
+            total_audio_files += 1
+    
+    log_print(f"📊 Found {total_audio_files} audio file(s) in channel")
+    log_print("="*50)
+    
+    # Second pass: Download files with progress tracking
     async for message in client.iter_messages(entity):
         if not message.media:
             continue
@@ -178,6 +204,10 @@ async def download_music_files(client, channel_username, download_dir):
         if not is_audio or not filename:
             continue
         
+        # Increment processed count and show progress
+        processed_count += 1
+        progress_pct = (processed_count / total_audio_files * 100) if total_audio_files > 0 else 0
+        
         # Sanitize filename
         filename = sanitize_filename(filename)
         file_path = download_path / filename
@@ -185,7 +215,7 @@ async def download_music_files(client, channel_username, download_dir):
         # Check if file is in ignore list (case-insensitive)
         if filename.lower() in ignore_list:
             original_ignore_name = ignore_list.get(filename.lower(), filename)
-            log_print(f"🚫 Skipping (in ignore list): {original_ignore_name}")
+            log_print(f"🚫 [{processed_count}/{total_audio_files} ({progress_pct:.1f}%)] Skipping (in ignore list): {original_ignore_name}")
             ignored_count += 1
             continue
         
@@ -195,29 +225,29 @@ async def download_music_files(client, channel_username, download_dir):
             # Show relative path if file is in a subfolder
             relative_path = existing_file.relative_to(download_path)
             if str(relative_path) != filename:
-                log_print(f"⏭️  Skipping (already exists in subfolder): {relative_path}")
+                log_print(f"⏭️  [{processed_count}/{total_audio_files} ({progress_pct:.1f}%)] Skipping (already exists in subfolder): {relative_path}")
             else:
-                log_print(f"⏭️  Skipping (already exists): {filename}")
+                log_print(f"⏭️  [{processed_count}/{total_audio_files} ({progress_pct:.1f}%)] Skipping (already exists): {filename}")
             skipped_count += 1
             continue
         
         # Download the file
         try:
-            log_print(f"⬇️  Downloading: {filename}")
+            log_print(f"⬇️  [{processed_count}/{total_audio_files} ({progress_pct:.1f}%)] Downloading: {filename}")
             # Download with the specified filename to preserve original name
             await client.download_media(message, file=str(file_path))
             
             # Verify file was downloaded
             if file_path.exists() and file_path.stat().st_size > 0:
-                log_print(f"✅ Downloaded: {filename}")
+                log_print(f"✅ [{processed_count}/{total_audio_files} ({progress_pct:.1f}%)] Downloaded: {filename}")
                 downloaded_count += 1
             else:
-                log_print(f"❌ Download failed (empty file): {filename}")
+                log_print(f"❌ [{processed_count}/{total_audio_files} ({progress_pct:.1f}%)] Download failed (empty file): {filename}")
                 if file_path.exists():
                     file_path.unlink()  # Remove empty file
                 error_count += 1
         except (OSError, IOError, asyncio.TimeoutError) as e:
-            log_print(f"❌ Error downloading {filename}: {e}")
+            log_print(f"❌ [{processed_count}/{total_audio_files} ({progress_pct:.1f}%)] Error downloading {filename}: {e}")
             error_count += 1
             # Remove partial download if exists
             if file_path.exists():
@@ -226,11 +256,15 @@ async def download_music_files(client, channel_username, download_dir):
     # Print summary
     log_print("\n" + "="*50)
     log_print("Download Summary:")
+    log_print(f"  📊 Total audio files found: {total_audio_files}")
     log_print(f"  ✅ Downloaded: {downloaded_count}")
     log_print(f"  ⏭️  Skipped (already exists): {skipped_count}")
     log_print(f"  🚫 Ignored (in ignore list): {ignored_count}")
     log_print(f"  ❌ Errors: {error_count}")
     log_print(f"  📁 Total files in directory: {downloaded_count + skipped_count}")
+    if total_audio_files > 0:
+        completion_pct = ((downloaded_count + skipped_count + ignored_count) / total_audio_files * 100)
+        log_print(f"  📈 Completion: {completion_pct:.1f}%")
     log_print("="*50)
 
 
@@ -244,9 +278,33 @@ def sanitize_filename(filename):
     return filename
 
 
+def normalize_filename(filename):
+    """
+    Normalize filename for comparison by:
+    1. Converting to lowercase
+    2. Normalizing Unicode characters (handles composed/decomposed forms)
+    3. Normalizing whitespace
+    
+    Args:
+        filename: Filename to normalize
+        
+    Returns:
+        str: Normalized filename
+    """
+    # Normalize Unicode to NFC (Canonical Composition) form
+    # This handles cases like "é" vs "e" + combining accent
+    normalized = unicodedata.normalize('NFC', filename)
+    # Convert to lowercase for case-insensitive comparison
+    normalized = normalized.lower()
+    # Normalize whitespace (replace multiple spaces with single space)
+    normalized = ' '.join(normalized.split())
+    return normalized
+
+
 def file_exists_in_directory(filename, directory):
     """
-    Check if a file exists in the directory or any of its subdirectories (case-insensitive).
+    Check if a file exists in the directory or any of its subdirectories.
+    Uses Unicode normalization and case-insensitive comparison to handle special characters.
     
     Args:
         filename: Name of the file to search for
@@ -258,12 +316,19 @@ def file_exists_in_directory(filename, directory):
     if not directory.exists() or not directory.is_dir():
         return None
     
-    filename_lower = filename.lower()
+    # Normalize the search filename
+    normalized_search = normalize_filename(filename)
     
     # Search recursively in all subdirectories
     for file_path in directory.rglob('*'):
-        if file_path.is_file() and file_path.name.lower() == filename_lower:
-            return file_path
+        if file_path.is_file():
+            # Try exact match first (faster)
+            if file_path.name == filename:
+                return file_path
+            # Try normalized comparison for special characters
+            normalized_existing = normalize_filename(file_path.name)
+            if normalized_existing == normalized_search:
+                return file_path
     
     return None
 
