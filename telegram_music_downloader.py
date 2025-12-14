@@ -189,9 +189,15 @@ async def download_music_files(client, channel_username, download_dir):
             ignored_count += 1
             continue
         
-        # Check if file already exists (sync-based download)
-        if file_path.exists():
-            log_print(f"⏭️  Skipping (already exists): {filename}")
+        # Check if file already exists in channel directory or any subfolder (sync-based download)
+        existing_file = file_exists_in_directory(filename, download_path)
+        if existing_file:
+            # Show relative path if file is in a subfolder
+            relative_path = existing_file.relative_to(download_path)
+            if str(relative_path) != filename:
+                log_print(f"⏭️  Skipping (already exists in subfolder): {relative_path}")
+            else:
+                log_print(f"⏭️  Skipping (already exists): {filename}")
             skipped_count += 1
             continue
         
@@ -236,6 +242,30 @@ def sanitize_filename(filename):
     # Remove leading/trailing spaces and dots
     filename = filename.strip(' .')
     return filename
+
+
+def file_exists_in_directory(filename, directory):
+    """
+    Check if a file exists in the directory or any of its subdirectories (case-insensitive).
+    
+    Args:
+        filename: Name of the file to search for
+        directory: Directory to search in (Path object)
+        
+    Returns:
+        Path or None: Path to the existing file if found, None otherwise
+    """
+    if not directory.exists() or not directory.is_dir():
+        return None
+    
+    filename_lower = filename.lower()
+    
+    # Search recursively in all subdirectories
+    for file_path in directory.rglob('*'):
+        if file_path.is_file() and file_path.name.lower() == filename_lower:
+            return file_path
+    
+    return None
 
 
 def load_ignore_list(base_dir):
