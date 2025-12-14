@@ -1,0 +1,36 @@
+# Environment variables
+.env
+
+# Telegram session files
+*.session
+*.session-journal
+
+# Downloaded files
+downloads/
+*.mp3
+*.m4a
+*.flac
+*.wav
+*.ogg
+*.opus
+*.aac
+*.wma
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
