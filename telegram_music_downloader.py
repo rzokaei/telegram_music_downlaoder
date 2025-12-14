@@ -8,6 +8,7 @@ Implements sync-based downloading (skips files that already exist).
 import os
 import sys
 import asyncio
+from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 from telethon import TelegramClient
@@ -24,6 +25,16 @@ SESSION_NAME = os.getenv('SESSION_NAME', 'telegram_music_downloader')
 
 # Supported audio file extensions
 AUDIO_EXTENSIONS = {'.mp3', '.m4a', '.flac', '.wav', '.ogg', '.opus', '.aac', '.wma'}
+
+
+def get_timestamp():
+    """Get formatted timestamp for log messages."""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def log_print(message):
+    """Print message with timestamp."""
+    print(f"[{get_timestamp()}] {message}")
 
 
 def is_audio_file(filename):
@@ -69,24 +80,31 @@ async def download_music_files(client, channel_username, download_dir):
         channel_username: Channel username or ID
         download_dir: Directory to save downloaded files
     """
-    # Create download directory if it doesn't exist
-    download_path = Path(download_dir)
-    download_path.mkdir(parents=True, exist_ok=True)
+    # Create base download directory if it doesn't exist
+    base_download_path = Path(download_dir)
+    base_download_path.mkdir(parents=True, exist_ok=True)
     
-    print("Connecting to Telegram...")
+    log_print("Connecting to Telegram...")
     await client.start()
-    print("Connected successfully!")
+    log_print("Connected successfully!")
     
-    print(f"Fetching messages from channel: {channel_username}")
+    log_print(f"Fetching messages from channel: {channel_username}")
     
     # Get channel entity
     try:
         entity = await client.get_entity(channel_username)
-        print(f"Channel found: {entity.title}")
+        channel_title = entity.title
+        log_print(f"Channel found: {channel_title}")
     except (ValueError, TypeError) as e:
-        print(f"Error: Could not find channel '{channel_username}'. Make sure you have access to it.")
-        print(f"Error details: {e}")
+        log_print(f"Error: Could not find channel '{channel_username}'. Make sure you have access to it.")
+        log_print(f"Error details: {e}")
         sys.exit(1)
+    
+    # Create channel-specific subfolder
+    sanitized_channel_name = sanitize_filename(channel_title)
+    download_path = base_download_path / sanitized_channel_name
+    download_path.mkdir(parents=True, exist_ok=True)
+    log_print(f"📁 Download directory: {download_path}")
     
     downloaded_count = 0
     skipped_count = 0
@@ -167,47 +185,47 @@ async def download_music_files(client, channel_username, download_dir):
         # Check if file is in ignore list (case-insensitive)
         if filename.lower() in ignore_list:
             original_ignore_name = ignore_list.get(filename.lower(), filename)
-            print(f"🚫 Skipping (in ignore list): {original_ignore_name}")
+            log_print(f"🚫 Skipping (in ignore list): {original_ignore_name}")
             ignored_count += 1
             continue
         
         # Check if file already exists (sync-based download)
         if file_path.exists():
-            print(f"⏭️  Skipping (already exists): {filename}")
+            log_print(f"⏭️  Skipping (already exists): {filename}")
             skipped_count += 1
             continue
         
         # Download the file
         try:
-            print(f"⬇️  Downloading: {filename}")
+            log_print(f"⬇️  Downloading: {filename}")
             # Download with the specified filename to preserve original name
             await client.download_media(message, file=str(file_path))
             
             # Verify file was downloaded
             if file_path.exists() and file_path.stat().st_size > 0:
-                print(f"✅ Downloaded: {filename}")
+                log_print(f"✅ Downloaded: {filename}")
                 downloaded_count += 1
             else:
-                print(f"❌ Download failed (empty file): {filename}")
+                log_print(f"❌ Download failed (empty file): {filename}")
                 if file_path.exists():
                     file_path.unlink()  # Remove empty file
                 error_count += 1
         except (OSError, IOError, asyncio.TimeoutError) as e:
-            print(f"❌ Error downloading {filename}: {e}")
+            log_print(f"❌ Error downloading {filename}: {e}")
             error_count += 1
             # Remove partial download if exists
             if file_path.exists():
                 file_path.unlink()
     
     # Print summary
-    print("\n" + "="*50)
-    print("Download Summary:")
-    print(f"  ✅ Downloaded: {downloaded_count}")
-    print(f"  ⏭️  Skipped (already exists): {skipped_count}")
-    print(f"  🚫 Ignored (in ignore list): {ignored_count}")
-    print(f"  ❌ Errors: {error_count}")
-    print(f"  📁 Total files in directory: {downloaded_count + skipped_count}")
-    print("="*50)
+    log_print("\n" + "="*50)
+    log_print("Download Summary:")
+    log_print(f"  ✅ Downloaded: {downloaded_count}")
+    log_print(f"  ⏭️  Skipped (already exists): {skipped_count}")
+    log_print(f"  🚫 Ignored (in ignore list): {ignored_count}")
+    log_print(f"  ❌ Errors: {error_count}")
+    log_print(f"  📁 Total files in directory: {downloaded_count + skipped_count}")
+    log_print("="*50)
 
 
 def sanitize_filename(filename):
@@ -245,16 +263,16 @@ def load_ignore_list(base_dir):
                     if line and not line.startswith('#'):
                         ignore_dict[line.lower()] = line
             if ignore_dict:
-                print(f"📋 Loaded {len(ignore_dict)} file(s) from ignore list")
+                log_print(f"📋 Loaded {len(ignore_dict)} file(s) from ignore list")
         except (IOError, OSError) as e:
-            print(f"⚠️  Warning: Could not read ignore_list.txt: {e}")
+            log_print(f"⚠️  Warning: Could not read ignore_list.txt: {e}")
     else:
         # Create an empty ignore_list.txt file if it doesn't exist
         try:
             ignore_list_path.touch()
-            print(f"📋 Created empty ignore_list.txt at {ignore_list_path}")
+            log_print(f"📋 Created empty ignore_list.txt at {ignore_list_path}")
         except (IOError, OSError) as e:
-            print(f"⚠️  Warning: Could not create ignore_list.txt: {e}")
+            log_print(f"⚠️  Warning: Could not create ignore_list.txt: {e}")
     
     return ignore_dict
 
@@ -263,13 +281,13 @@ async def main():
     """Main function to run the downloader."""
     # Validate configuration
     if not API_ID or not API_HASH:
-        print("Error: API_ID and API_HASH must be set in .env file or environment variables.")
-        print("Get them from https://my.telegram.org/apps")
+        log_print("Error: API_ID and API_HASH must be set in .env file or environment variables.")
+        log_print("Get them from https://my.telegram.org/apps")
         sys.exit(1)
     
     if not CHANNEL_USERNAME:
-        print("Error: CHANNEL_USERNAME must be set in .env file or environment variables.")
-        print("Format: '@channelname' or channel ID")
+        log_print("Error: CHANNEL_USERNAME must be set in .env file or environment variables.")
+        log_print("Format: '@channelname' or channel ID")
         sys.exit(1)
     
     # Create Telegram client
@@ -278,9 +296,9 @@ async def main():
     try:
         await download_music_files(client, CHANNEL_USERNAME, DOWNLOAD_DIR)
     except KeyboardInterrupt:
-        print("\n\nDownload interrupted by user.")
+        log_print("\n\nDownload interrupted by user.")
     except (ValueError, TypeError, ConnectionError) as e:
-        print(f"\n\nError: {e}")
+        log_print(f"\n\nError: {e}")
         import traceback
         traceback.print_exc()
     finally:

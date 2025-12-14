@@ -34,3 +34,6 @@ ENV/
 *.swo
 *~
 
+# macOS
+.DS_Store
+./Thumbs.db
