@@ -27,6 +27,9 @@ SESSION_NAME = os.getenv('SESSION_NAME', 'telegram_music_downloader')
 # Supported audio file extensions
 AUDIO_EXTENSIONS = {'.mp3', '.m4a', '.flac', '.wav', '.ogg', '.opus', '.aac', '.wma'}
 
+# File extensions to skip downloading
+SKIP_EXTENSIONS = {'.m4a', '.wav', '.mov', '.ogg'}
+
 
 def get_timestamp():
     """Get formatted timestamp for log messages."""
@@ -110,6 +113,7 @@ async def download_music_files(client, channel_username, download_dir):
     downloaded_count = 0
     skipped_count = 0
     ignored_count = 0
+    skipped_format_count = 0
     error_count = 0
     processed_count = 0
     
@@ -117,7 +121,7 @@ async def download_music_files(client, channel_username, download_dir):
     script_dir = Path(__file__).parent.absolute()
     ignore_list = load_ignore_list(script_dir)
     
-    # First pass: Count total audio files for progress tracking
+    # First pass: Count total audio files for progress tracking (excluding skipped formats)
     log_print("📊 Counting audio files in channel...")
     total_audio_files = 0
     async for message in client.iter_messages(entity):
@@ -126,17 +130,41 @@ async def download_music_files(client, channel_username, download_dir):
         
         # Check if message contains audio (same logic as below)
         is_audio = False
-        if message.audio or message.voice:
+        filename = None
+        if message.audio:
             is_audio = True
+            audio = message.audio
+            filename = get_filename_from_document(audio)
+            if not filename:
+                performer = getattr(audio, 'performer', None)
+                title = getattr(audio, 'title', None)
+                if performer and title:
+                    filename = f"{performer} - {title}.mp3"
+                elif title:
+                    filename = f"{title}.mp3"
+                else:
+                    filename = f"audio_{message.id}.mp3"
+        elif message.voice:
+            is_audio = True
+            filename = get_filename_from_document(message.voice)
+            if not filename:
+                filename = f"voice_{message.id}.ogg"
         elif message.document:
             doc = message.document
             is_audio_mime = hasattr(doc, 'mime_type') and doc.mime_type and doc.mime_type.startswith('audio/')
             filename = get_filename_from_document(doc)
             if is_audio_mime or (filename and is_audio_file(filename)):
                 is_audio = True
+                if not filename and is_audio_mime:
+                    ext = get_file_extension_from_mime(doc.mime_type)
+                    filename = f"audio_{message.id}{ext}"
         
-        if is_audio:
-            total_audio_files += 1
+        if is_audio and filename:
+            # Check if this format should be skipped
+            filename_sanitized = sanitize_filename(filename)
+            file_ext = Path(filename_sanitized).suffix.lower()
+            if file_ext not in SKIP_EXTENSIONS:
+                total_audio_files += 1
     
     log_print(f"📊 Found {total_audio_files} audio file(s) in channel")
     log_print("="*50)
@@ -204,12 +232,20 @@ async def download_music_files(client, channel_username, download_dir):
         if not is_audio or not filename:
             continue
         
-        # Increment processed count and show progress
+        # Sanitize filename first
+        filename = sanitize_filename(filename)
+        
+        # Check if file format should be skipped (before incrementing processed_count)
+        file_ext = Path(filename).suffix.lower()
+        if file_ext in SKIP_EXTENSIONS:
+            log_print(f"⏭️  Skipping (format not supported): {filename}")
+            skipped_format_count += 1
+            continue
+        
+        # Increment processed count and show progress (only for files we're processing)
         processed_count += 1
         progress_pct = (processed_count / total_audio_files * 100) if total_audio_files > 0 else 0
         
-        # Sanitize filename
-        filename = sanitize_filename(filename)
         file_path = download_path / filename
         
         # Check if file is in ignore list (case-insensitive)
@@ -231,27 +267,43 @@ async def download_music_files(client, channel_username, download_dir):
             skipped_count += 1
             continue
         
-        # Download the file
-        try:
-            log_print(f"⬇️  [{processed_count}/{total_audio_files} ({progress_pct:.1f}%)] Downloading: {filename}")
-            # Download with the specified filename to preserve original name
-            await client.download_media(message, file=str(file_path))
-            
-            # Verify file was downloaded
-            if file_path.exists() and file_path.stat().st_size > 0:
-                log_print(f"✅ [{processed_count}/{total_audio_files} ({progress_pct:.1f}%)] Downloaded: {filename}")
-                downloaded_count += 1
-            else:
-                log_print(f"❌ [{processed_count}/{total_audio_files} ({progress_pct:.1f}%)] Download failed (empty file): {filename}")
+        # Download the file with retry logic
+        max_retries = 3
+        retry_count = 0
+        download_success = False
+        
+        while retry_count <= max_retries and not download_success:
+            try:
+                if retry_count == 0:
+                    log_print(f"⬇️  [{processed_count}/{total_audio_files} ({progress_pct:.1f}%)] Downloading: {filename}")
+                else:
+                    log_print(f"🔄 [{processed_count}/{total_audio_files} ({progress_pct:.1f}%)] Retrying download ({retry_count}/{max_retries}): {filename}")
+                
+                # Download with the specified filename to preserve original name
+                await client.download_media(message, file=str(file_path))
+                
+                # Verify file was downloaded
+                if file_path.exists() and file_path.stat().st_size > 0:
+                    log_print(f"✅ [{processed_count}/{total_audio_files} ({progress_pct:.1f}%)] Downloaded: {filename}")
+                    downloaded_count += 1
+                    download_success = True
+                else:
+                    raise IOError("Downloaded file is empty or does not exist")
+                    
+            except (OSError, IOError, asyncio.TimeoutError, ConnectionError, ValueError) as e:
+                retry_count += 1
+                
+                # Remove partial download if exists
                 if file_path.exists():
-                    file_path.unlink()  # Remove empty file
-                error_count += 1
-        except (OSError, IOError, asyncio.TimeoutError) as e:
-            log_print(f"❌ [{processed_count}/{total_audio_files} ({progress_pct:.1f}%)] Error downloading {filename}: {e}")
-            error_count += 1
-            # Remove partial download if exists
-            if file_path.exists():
-                file_path.unlink()
+                    file_path.unlink()
+                
+                if retry_count <= max_retries:
+                    log_print(f"⚠️  [{processed_count}/{total_audio_files} ({progress_pct:.1f}%)] Download failed: {e}")
+                    log_print("⏳ Waiting 60 seconds before retry...")
+                    await asyncio.sleep(60)
+                else:
+                    log_print(f"❌ [{processed_count}/{total_audio_files} ({progress_pct:.1f}%)] Download failed after {max_retries} retries: {e}")
+                    error_count += 1
     
     # Print summary
     log_print("\n" + "="*50)
@@ -260,6 +312,7 @@ async def download_music_files(client, channel_username, download_dir):
     log_print(f"  ✅ Downloaded: {downloaded_count}")
     log_print(f"  ⏭️  Skipped (already exists): {skipped_count}")
     log_print(f"  🚫 Ignored (in ignore list): {ignored_count}")
+    log_print(f"  ⏭️  Skipped (format not supported): {skipped_format_count}")
     log_print(f"  ❌ Errors: {error_count}")
     log_print(f"  📁 Total files in directory: {downloaded_count + skipped_count}")
     if total_audio_files > 0:
